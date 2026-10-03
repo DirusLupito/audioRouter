@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -g -I.
-LDFLAGS = -lwinmm
+LDFLAGS = -lole32
 
 # Directories
 SOURCE_DIR = src

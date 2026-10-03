@@ -1,111 +1,225 @@
+// Enable the C macros for COM interface calls.
+#define COBJMACROS
 #include <Windows.h>
-#include <mmsystem.h>
+// Define the GUID constants declared by the MMDevice and property-key headers.
+#include <initguid.h>
+#include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 
 int main(void) {
-    int status = EXIT_SUCCESS;
-
     printf("audioRouter starting.\n");
 
+    // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-coinitializeex
+    // HRESULT CoInitializeEx(
+    //   LPVOID pvReserved,
+    //   DWORD  dwCoInit
+    // );
+    //
+    // pvReserved
+    // Reserved; pass NULL.
+    //
+    // dwCoInit
+    // COM initialization options for this thread. COINIT_MULTITHREADED selects
+    // the multithreaded apartment.
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
 
-    // https://learn.microsoft.com/en-us/windows/win32/api/mmeapi/nf-mmeapi-waveoutgetnumdevs
-    // UINT waveOutGetNumDevs();
+    // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-cocreateinstance
+    // HRESULT CoCreateInstance(
+    //   REFCLSID  rclsid,
+    //   LPUNKNOWN pUnkOuter,
+    //   DWORD     dwClsContext,
+    //   REFIID    riid,
+    //   LPVOID    *ppv
+    // );
+    //
+    // rclsid
+    // Identifies the COM class to create: MMDeviceEnumerator here.
+    //
+    // pUnkOuter
+    // The controlling object for COM aggregation. NULL for this standalone object.
+    //
+    // dwClsContext
+    // Where the object runs. CLSCTX_INPROC_SERVER loads it into this process.
+    //
+    // riid
+    // Identifies the interface we want from the object: IMMDeviceEnumerator.
+    //
+    // ppv
+    // Receives the requested interface pointer. Release it when finished.
+    IMMDeviceEnumerator *enumerator = NULL;
+    CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_INPROC_SERVER,
+                     &IID_IMMDeviceEnumerator, (void **)&enumerator);
 
-    uint32_t output_count = (uint32_t) waveOutGetNumDevs();
+    // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdeviceenumerator-enumaudioendpoints
+    // HRESULT EnumAudioEndpoints(
+    //   EDataFlow           dataFlow,
+    //   DWORD               dwStateMask,
+    //   IMMDeviceCollection **ppDevices
+    // );
+    //
+    // dataFlow
+    // eRender selects playback devices; eCapture selects recording devices;
+    // eAll selects both.
+    //
+    // dwStateMask
+    // Filters by device state. DEVICE_STATE_ACTIVE selects available devices.
+    // See the documentation for the other state flags.
+    //
+    // ppDevices
+    // Receives the device collection. Release it when finished.
+    IMMDeviceCollection *devices = NULL;
+    IMMDeviceEnumerator_EnumAudioEndpoints(
+        enumerator, eRender, DEVICE_STATE_ACTIVE, &devices);
+
+    // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevicecollection-getcount
+    // HRESULT GetCount(
+    //   UINT *pcDevices
+    // );
+    //
+    // pcDevices
+    // Receives the number of entries in this collection.
+    UINT output_count = 0;
+    IMMDeviceCollection_GetCount(devices, &output_count);
     printf("\nPlayback devices (%u):\n", output_count);
-    for (uint32_t id = 0; id < output_count; ++id) {
 
-        // https://learn.microsoft.com/en-us/windows/win32/api/mmeapi/ns-mmeapi-waveoutcapsa
-        // typedef struct tagWAVEOUTCAPSA {
-        //   WORD      wMid;
-        //   WORD      wPid;
-        //   MMVERSION vDriverVersion;
-        //   CHAR      szPname[MAXPNAMELEN];
-        //   DWORD     dwFormats;
-        //   WORD      wChannels;
-        //   WORD      wReserved1;
-        //   DWORD     dwSupport;
-        // } WAVEOUTCAPSA, *PWAVEOUTCAPSA, *NPWAVEOUTCAPSA, *LPWAVEOUTCAPSA;
-        // wMid
-        // 
-        // Manufacturer identifier for the device driver for the device. Manufacturer identifiers are defined in Manufacturer and Product Identifiers.
-        // 
-        // wPid
-        // 
-        // Product identifier for the device. Product identifiers are defined in Manufacturer and Product Identifiers.
-        // 
-        // vDriverVersion
-        // 
-        // Version number of the device driver for the device. The high-order byte is the major version number, and the low-order byte is the minor version number.
-        // 
-        // szPname[MAXPNAMELEN]
-        // 
-        // Product name in a null-terminated string.
-        // 
-        // dwFormats
-        // 
-        // Standard formats that are supported.
-
-
-        WAVEOUTCAPSA device;
-
-        // https://learn.microsoft.com/en-us/windows/win32/api/mmeapi/nf-mmeapi-waveoutgetdevcapsa
-        // MMRESULT waveOutGetDevCapsA(
-        //   UINT_PTR       uDeviceID,
-        //   LPWAVEOUTCAPSA pwoc,
-        //   UINT           cbwoc
+    for (UINT index = 0; index < output_count; ++index) {
+        // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevicecollection-item
+        // HRESULT Item(
+        //   UINT      nDevice,
+        //   IMMDevice **ppDevice
         // );
-        // 
-        // uDeviceID
         //
-        // Identifier of the waveform-audio output device. It can be either a device identifier or a handle of an open waveform-audio output device.
+        // nDevice
+        // Zero-based index in this collection, from 0 through output_count - 1.
         //
-        // pwoc
-        //
-        // Pointer to a WAVEOUTCAPSA structure to be filled with information about the capabilities of the device.
-        //
-        // cbwoc
-        //
-        // Size, in bytes, of the WAVEOUTCAPSA structure.
+        // ppDevice
+        // Receives the device interface. Each successful Item call acquires
+        // a reference that must be released when finished.
+        IMMDevice *device = NULL;
+        IMMDeviceCollection_Item(devices, index, &device);
 
-        MMRESULT result = waveOutGetDevCapsA(id, &device, sizeof(device));
-        if (result != MMSYSERR_NOERROR) {
-            printf("Could not read playback device %u (error %u).\n",
-                    id, result);
-            status = EXIT_FAILURE;
-            continue;
-        }
-        printf("  %u: %s\n", id, device.szPname);
+        // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevice-openpropertystore
+        // HRESULT OpenPropertyStore(
+        //   DWORD          stgmAccess,
+        //   IPropertyStore **ppProperties
+        // );
+        //
+        // stgmAccess
+        // Access mode for the properties. STGM_READ requests read-only access.
+        //
+        // ppProperties
+        // Receives the property-store interface. Release it when finished.
+        IPropertyStore *properties = NULL;
+        IMMDevice_OpenPropertyStore(device, STGM_READ, &properties);
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/propidlbase/ns-propidlbase-propvariant
+        // Relevant member declarations from PROPVARIANT (other members omitted):
+        // VARTYPE vt;
+        // LPWSTR  pwszVal;
+        //
+        // vt
+        // Identifies the value's type. Zero initialization sets VT_EMPTY.
+        //
+        // pwszVal
+        // Holds the wide-string pointer when vt is VT_LPWSTR.
+        // See the documentation for the full union and other value types.
+        PROPVARIANT name = {0};
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/propsys/nf-propsys-ipropertystore-getvalue
+        // HRESULT GetValue(
+        //   REFPROPERTYKEY key,
+        //   PROPVARIANT    *pv
+        // );
+        //
+        // key
+        // Identifies the property to read; in C, pass a pointer to the key.
+        //
+        // pv
+        // Receives the property's type and value. Clear it when finished.
+        //
+        // https://learn.microsoft.com/en-us/windows/win32/coreaudio/pkey-device-friendlyname
+        // PKEY_Device_FriendlyName returns a VT_LPWSTR containing the display name.
+        IPropertyStore_GetValue(properties, &PKEY_Device_FriendlyName, &name);
+        printf("  %u: %ls\n", index, name.pwszVal);
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/propidl/nf-propidl-propvariantclear
+        // HRESULT PropVariantClear(
+        //   PROPVARIANT *pvar
+        // );
+        //
+        // pvar
+        // The value to clear. Frees its owned data, including the name string,
+        // and resets the type to VT_EMPTY.
+        PropVariantClear(&name);
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/unknwn/nf-unknwn-iunknown-release
+        // ULONG Release();
+        //
+        // Releases one reference to a COM interface. The object is destroyed
+        // when its reference count reaches zero.
+        IPropertyStore_Release(properties);
+        IMMDevice_Release(device);
     }
 
-    printf("Identify by number which playback device(s) you wish to split audio to. WARNING: Do not select the primary playback device used by Windows.\n");
+    printf("Identify by number which playback device you wish to split audio to. "
+           "WARNING: Do not select the primary playback device used by Windows.\n");
 
     char input[256] = {0};
-
-    uint32_t selected_device_id = 0;
+    int status = EXIT_SUCCESS;
 
     if (fgets(input, sizeof(input), stdin) == NULL) {
         printf("Error reading input.\n");
         status = EXIT_FAILURE;
     } else {
-        // Remove newline character if present
-        size_t len = strlen(input);
-        if (len > 0 && input[len - 1] == '\n') {
-            input[len - 1] = '\0';
-        }
-        // Process the input as needed
+        unsigned long selected_device_index = strtoul(input, NULL, 10);
 
-        selected_device_id = (uint32_t) strtoul(input, NULL, 10);
-        if (selected_device_id >= output_count) {
-            printf("Invalid device ID selected.\n");
+        if (selected_device_index >= output_count) {
+            printf("Invalid device index selected.\n");
             status = EXIT_FAILURE;
+        } else {
+            IMMDevice *selected_device = NULL;
+            IMMDeviceCollection_Item(devices, (UINT)selected_device_index,
+                                     &selected_device);
+
+            // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevice-getid
+            // HRESULT GetId(
+            //   LPWSTR *ppstrId
+            // );
+            //
+            // ppstrId
+            // Receives an allocated endpoint ID string. Treat it as opaque;
+            // it identifies this endpoint independently of the collection index.
+            // Free the string with CoTaskMemFree when finished.
+            LPWSTR endpoint_id = NULL;
+            IMMDevice_GetId(selected_device, &endpoint_id);
+            printf("Selected device index: %lu\n", selected_device_index);
+            printf("Endpoint ID: %ls\n", endpoint_id);
+
+            // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-cotaskmemfree
+            // void CoTaskMemFree(
+            //   LPVOID pv
+            // );
+            //
+            // pv
+            // Address of the allocation to free; here, the string from GetId.
+            CoTaskMemFree(endpoint_id);
+
+            // selected_device is the IMMDevice to use for WASAPI playback.
+            IMMDevice_Release(selected_device);
         }
     }
-    printf("Selected device ID: %u\n", selected_device_id);
 
+    IMMDeviceCollection_Release(devices);
+    IMMDeviceEnumerator_Release(enumerator);
 
+    // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-couninitialize
+    // void CoUninitialize();
+    //
+    // Balances this thread's successful CoInitializeEx call after its COM
+    // interfaces have been released.
+    CoUninitialize();
 
     return status;
 }
