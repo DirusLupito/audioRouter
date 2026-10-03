@@ -174,53 +174,70 @@ int main(void) {
     uint64_t selected_devices = 0;
     int status = EXIT_SUCCESS;
 
-    if (fgets(input, sizeof(input), stdin) == NULL) {
-        printf("Error reading input.\n");
-        status = EXIT_FAILURE;
-    } else {
-        // for example, 000 means no devices selected, 001 means device 3 selected,
-        // 100 means device 1 selected, 101 means devices 1 and 3 selected, etc.
+    while (1) {
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            printf("Error reading input.\n");
+            status = EXIT_FAILURE;
+        } else {
+            // for example, 000 means no devices selected, 001 means device 3 selected,
+            // 100 means device 1 selected, 101 means devices 1 and 3 selected, etc.
 
-        size_t digit_count = strcspn(input, "\r\n");
-        for (size_t i = digit_count; i > 0; --i) {
-            selected_devices = selected_devices * 2 + (input[i - 1] - '0');
-        }
-
-        uint64_t remaining_devices = selected_devices;
-        for (UINT index = 0; index < output_count && remaining_devices != 0;
-             ++index, remaining_devices /= 2) {
-            if (remaining_devices % 2 == 0) {
-                continue;
+            size_t digit_count = strcspn(input, "\r\n");
+            for (size_t i = digit_count; i > 0; --i) {
+                selected_devices = selected_devices * 2 + (input[i - 1] - '0');
             }
 
-            IMMDevice *selected_device = NULL;
-            IMMDeviceCollection_Item(devices, index, &selected_device);
+            uint64_t remaining_devices = selected_devices;
+            for (UINT index = 0; index < output_count && remaining_devices != 0;
+                ++index, remaining_devices /= 2) {
+                if (remaining_devices % 2 == 0) {
+                    continue;
+                }
 
-            // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevice-getid
-            // HRESULT GetId(
-            //   LPWSTR *ppstrId
-            // );
-            //
-            // ppstrId
-            // Receives an allocated endpoint ID string. Treat it as opaque;
-            // it identifies this endpoint independently of the collection index.
-            // Free the string with CoTaskMemFree when finished.
-            LPWSTR endpoint_id = NULL;
-            IMMDevice_GetId(selected_device, &endpoint_id);
-            printf("Selected device: %u\n", index + 1);
-            printf("Endpoint ID: %ls\n", endpoint_id);
+                IMMDevice *selected_device = NULL;
+                IMMDeviceCollection_Item(devices, index, &selected_device);
 
-            // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-cotaskmemfree
-            // void CoTaskMemFree(
-            //   LPVOID pv
-            // );
-            //
-            // pv
-            // Address of the allocation to free; here, the string from GetId.
-            CoTaskMemFree(endpoint_id);
+                // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevice-getid
+                // HRESULT GetId(
+                //   LPWSTR *ppstrId
+                // );
+                //
+                // ppstrId
+                // Receives an allocated endpoint ID string. Treat it as opaque;
+                // it identifies this endpoint independently of the collection index.
+                // Free the string with CoTaskMemFree when finished.
+                LPWSTR endpoint_id = NULL;
+                IMMDevice_GetId(selected_device, &endpoint_id);
+                printf("Selected device: %u\n", index + 1);
+                printf("Endpoint ID: %ls\n", endpoint_id);
 
-            // selected_device is the IMMDevice to use for WASAPI playback.
-            IMMDevice_Release(selected_device);
+                // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-cotaskmemfree
+                // void CoTaskMemFree(
+                //   LPVOID pv
+                // );
+                //
+                // pv
+                // Address of the allocation to free; here, the string from GetId.
+                CoTaskMemFree(endpoint_id);
+
+                // selected_device is the IMMDevice to use for WASAPI playback.
+                IMMDevice_Release(selected_device);
+            }
+        }
+
+        printf("Are these selections correct? (y/n): ");
+        char confirmation[8] = {0};
+        if (fgets(confirmation, sizeof(confirmation), stdin) == NULL) {
+            printf("Error reading input.\n");
+            status = EXIT_FAILURE;
+        } else if (confirmation[0] == 'y' || confirmation[0] == 'Y') {
+            break;
+        } else {
+            printf("Enter up to 64 binary digits to select playback devices.\n"
+                   "Leftmost digit = device 1, next digit = device 2, etc.\n"
+                   "Omitted digits are 0; all zeros exits.\n"
+                   "WARNING: Do not select the primary playback device used by Windows.\n");
+            selected_devices = 0;
         }
     }
 
