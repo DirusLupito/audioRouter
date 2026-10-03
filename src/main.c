@@ -4,6 +4,7 @@
 // Define the GUID constants declared by the MMDevice and property-key headers.
 #include <initguid.h>
 #include <mmdeviceapi.h>
+#include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -304,6 +305,142 @@ int main(void) {
                    index + 1);
             status = EXIT_FAILURE;
             break;
+        }
+    }
+
+    if (status == EXIT_SUCCESS && selected_devices != 0) {
+        // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevice-activate
+        // HRESULT Activate(
+        //   REFIID      iid,
+        //   DWORD       dwClsCtx,
+        //   PROPVARIANT *pActivationParams,
+        //   void        **ppInterface
+        // );
+        //
+        // iid
+        // Identifies the interface to create: IAudioClient manages the stream.
+        //
+        // dwClsCtx
+        // CLSCTX_ALL permits any supported COM execution context.
+        //
+        // pActivationParams
+        // Optional activation settings. NULL uses ordinary endpoint activation.
+        //
+        // ppInterface
+        // Receives the requested interface. Release it when finished.
+        IAudioClient *audio_client = NULL;
+        HRESULT result = IMMDevice_Activate(source_device, &IID_IAudioClient,
+                                            CLSCTX_ALL, NULL,
+                                            (void **)&audio_client);
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-getmixformat
+        // HRESULT GetMixFormat(
+        //   WAVEFORMATEX **ppDeviceFormat
+        // );
+        //
+        // ppDeviceFormat
+        // Receives an allocated description of the audio engine's mix format.
+        // It can contain WAVEFORMATEXTENSIBLE data beyond the WAVEFORMATEX header.
+        //
+        // https://learn.microsoft.com/en-us/windows/win32/api/mmeapi/ns-mmeapi-waveformatex
+        // typedef struct tWAVEFORMATEX {
+        //   WORD  wFormatTag;
+        //   WORD  nChannels;
+        //   DWORD nSamplesPerSec;
+        //   DWORD nAvgBytesPerSec;
+        //   WORD  nBlockAlign;
+        //   WORD  wBitsPerSample;
+        //   WORD  cbSize;
+        // } WAVEFORMATEX;
+        //
+        // wFormatTag
+        // Identifies the sample format; see the documentation for format tags.
+        // nChannels
+        // Channel count, such as 2 for stereo.
+        // nSamplesPerSec
+        // Sample rate in Hz.
+        // nAvgBytesPerSec
+        // Average bytes of audio data per second.
+        // nBlockAlign
+        // Bytes per complete audio frame for PCM or IEEE float audio.
+        // wBitsPerSample
+        // Bits used to store each channel's sample.
+        // cbSize
+        // Number of extra format bytes following this header.
+        WAVEFORMATEX *mix_format = NULL;
+        if (SUCCEEDED(result)) {
+            result = IAudioClient_GetMixFormat(audio_client, &mix_format);
+        }
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize
+        // HRESULT Initialize(
+        //   AUDCLNT_SHAREMODE  ShareMode,
+        //   DWORD             StreamFlags,
+        //   REFERENCE_TIME    hnsBufferDuration,
+        //   REFERENCE_TIME    hnsPeriodicity,
+        //   const WAVEFORMATEX *pFormat,
+        //   LPCGUID           AudioSessionGuid
+        // );
+        //
+        // ShareMode
+        // AUDCLNT_SHAREMODE_SHARED shares the endpoint with other applications.
+        // Loopback requires shared mode.
+        //
+        // StreamFlags
+        // AUDCLNT_STREAMFLAGS_LOOPBACK captures the playback endpoint's mix.
+        //
+        // hnsBufferDuration
+        // Requested buffer duration in 100-nanosecond units. Zero requests
+        // the minimum buffer size required by the audio engine.
+        //
+        // hnsPeriodicity
+        // Requested device period. Must be zero in shared mode.
+        //
+        // pFormat
+        // The complete format description returned by GetMixFormat.
+        //
+        // AudioSessionGuid
+        // Identifies an audio session. NULL uses the default session GUID.
+        if (SUCCEEDED(result)) {
+            result = IAudioClient_Initialize(audio_client, AUDCLNT_SHAREMODE_SHARED,
+                                            AUDCLNT_STREAMFLAGS_LOOPBACK,
+                                            0, 0, mix_format, NULL);
+        }
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-getservice
+        // HRESULT GetService(
+        //   REFIID riid,
+        //   void   **ppv
+        // );
+        //
+        // riid
+        // IID_IAudioCaptureClient requests access to captured audio packets.
+        // Call GetService after the audio stream has been initialized.
+        //
+        // ppv
+        // Receives the capture interface. Release it before the audio client.
+        IAudioCaptureClient *capture_client = NULL;
+        if (SUCCEEDED(result)) {
+            result = IAudioClient_GetService(audio_client, &IID_IAudioCaptureClient,
+                                            (void **)&capture_client);
+        }
+
+        if (SUCCEEDED(result)) {
+            printf("\nLoopback capture stream initialized. Cleaning up.\n");
+        } else {
+            printf("Loopback setup failed (HRESULT 0x%08lX).\n",
+                   (unsigned long)result);
+            status = EXIT_FAILURE;
+        }
+
+        // The stream is initialized but has not been started, so no Stop is needed.
+        // Release the capture service before its parent audio client.
+        if (capture_client != NULL) {
+            IAudioCaptureClient_Release(capture_client);
+        }
+        CoTaskMemFree(mix_format);
+        if (audio_client != NULL) {
+            IAudioClient_Release(audio_client);
         }
     }
 
