@@ -241,6 +241,48 @@ int main(void) {
         }
     }
 
+    // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdeviceenumerator-getdefaultaudioendpoint
+    // HRESULT GetDefaultAudioEndpoint(
+    //   EDataFlow dataFlow,
+    //   ERole     role,
+    //   IMMDevice **ppEndpoint
+    // );
+    //
+    // dataFlow
+    // eRender requests the default playback device; eCapture requests the
+    // default recording device. Loopback uses the playback device as its source.
+    //
+    // role
+    // Selects which default to use. eConsole is the general system audio role;
+    // eMultimedia is for media playback, and eCommunications is for voice calls.
+    //
+    // ppEndpoint
+    // Receives the default device interface. Release it when finished.
+    IMMDevice *source_device = NULL;
+    IMMDeviceEnumerator_GetDefaultAudioEndpoint(
+        enumerator, eRender, eConsole, &source_device);
+
+    // Read the source's name and endpoint ID using the same calls documented above.
+    IPropertyStore *source_properties = NULL;
+    IMMDevice_OpenPropertyStore(source_device, STGM_READ, &source_properties);
+
+    PROPVARIANT source_name = {0};
+    IPropertyStore_GetValue(source_properties, &PKEY_Device_FriendlyName,
+                           &source_name);
+
+    LPWSTR source_endpoint_id = NULL;
+    IMMDevice_GetId(source_device, &source_endpoint_id);
+
+    printf("\nDefault playback device (loopback source):\n");
+    printf("Name: %ls\n", source_name.pwszVal);
+    printf("Endpoint ID: %ls\n", source_endpoint_id);
+    printf("Direction: playback (eRender)\nRole: console (eConsole)\n");
+
+    CoTaskMemFree(source_endpoint_id);
+    PropVariantClear(&source_name);
+    IPropertyStore_Release(source_properties);
+
+    IMMDevice_Release(source_device);
     IMMDeviceCollection_Release(devices);
     IMMDeviceEnumerator_Release(enumerator);
 
