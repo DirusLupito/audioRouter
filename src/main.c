@@ -13,7 +13,7 @@
 #include <wchar.h>
 
 // Pending audio per destination, in milliseconds. Use a positive integer.
-#define QUEUE_DURATION_MS 10
+#define QUEUE_DURATION_MS 100
 
 typedef struct {
     IAudioClient *client;
