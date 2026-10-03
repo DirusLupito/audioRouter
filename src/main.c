@@ -12,6 +12,47 @@
 #include <string.h>
 #include <wchar.h>
 
+typedef struct {
+    IAudioClient *client;
+    IAudioCaptureClient *capture;
+    WAVEFORMATEX *format;
+    BOOL started;
+} CaptureStream;
+
+typedef struct {
+    IAudioClient *client;
+    IAudioRenderClient *render;
+    UINT32 buffer_frames;
+    BYTE *queue;
+    UINT32 capacity;
+    UINT32 queued;
+    BOOL started;
+} PlaybackStream;
+
+static volatile LONG stop_requested = 0;
+
+static BOOL WINAPI handle_console_signal(DWORD signal) {
+    if (signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT) {
+        // Windows invokes this handler on another thread; only signal main.
+        // https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-interlockedexchange
+        // LONG InterlockedExchange(
+        //   LONG volatile *Target,
+        //   LONG          Value
+        // );
+        //
+        // Target
+        // Points to the shared 32-bit value to update atomically.
+        //
+        // Value
+        // The replacement value. Here, 1 requests that forwarding stop.
+        //
+        // Returns the previous value. We do not need it when setting the flag.
+        InterlockedExchange(&stop_requested, 1);
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static IMMDeviceEnumerator *initialize_audio(void) {
     // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-coinitializeex
     // HRESULT CoInitializeEx(
@@ -340,8 +381,7 @@ static int validate_destinations(IMMDeviceCollection *devices, UINT output_count
     return status;
 }
 
-static int initialize_and_cleanup_loopback(IMMDevice *source_device) {
-    int status = EXIT_SUCCESS;
+static HRESULT initialize_loopback(IMMDevice *source_device, CaptureStream *stream) {
 
     // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevice-activate
     // HRESULT Activate(
@@ -362,10 +402,9 @@ static int initialize_and_cleanup_loopback(IMMDevice *source_device) {
     //
     // ppInterface
     // Receives the requested interface. Release it when finished.
-    IAudioClient *audio_client = NULL;
     HRESULT result = IMMDevice_Activate(source_device, &IID_IAudioClient,
                                         CLSCTX_ALL, NULL,
-                                        (void **)&audio_client);
+                                        (void **)&stream->client);
 
     // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-getmixformat
     // HRESULT GetMixFormat(
@@ -401,9 +440,8 @@ static int initialize_and_cleanup_loopback(IMMDevice *source_device) {
     // Bits used to store each channel's sample.
     // cbSize
     // Number of extra format bytes following this header.
-    WAVEFORMATEX *mix_format = NULL;
     if (SUCCEEDED(result)) {
-        result = IAudioClient_GetMixFormat(audio_client, &mix_format);
+        result = IAudioClient_GetMixFormat(stream->client, &stream->format);
     }
 
     // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize
@@ -424,8 +462,8 @@ static int initialize_and_cleanup_loopback(IMMDevice *source_device) {
     // AUDCLNT_STREAMFLAGS_LOOPBACK captures the playback endpoint's mix.
     //
     // hnsBufferDuration
-    // Requested buffer duration in 100-nanosecond units. Zero requests
-    // the minimum buffer size required by the audio engine.
+    // Requested buffer duration in 100-nanosecond units. 1000000 is 100 ms,
+    // giving the polling loop some room for scheduling delays.
     //
     // hnsPeriodicity
     // Requested device period. Must be zero in shared mode.
@@ -436,9 +474,9 @@ static int initialize_and_cleanup_loopback(IMMDevice *source_device) {
     // AudioSessionGuid
     // Identifies an audio session. NULL uses the default session GUID.
     if (SUCCEEDED(result)) {
-        result = IAudioClient_Initialize(audio_client, AUDCLNT_SHAREMODE_SHARED,
+        result = IAudioClient_Initialize(stream->client, AUDCLNT_SHAREMODE_SHARED,
                                         AUDCLNT_STREAMFLAGS_LOOPBACK,
-                                        0, 0, mix_format, NULL);
+                                        1000000, 0, stream->format, NULL);
     }
 
     // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-getservice
@@ -453,36 +491,21 @@ static int initialize_and_cleanup_loopback(IMMDevice *source_device) {
     //
     // ppv
     // Receives the capture interface. Release it before the audio client.
-    IAudioCaptureClient *capture_client = NULL;
     if (SUCCEEDED(result)) {
-        result = IAudioClient_GetService(audio_client, &IID_IAudioCaptureClient,
-                                        (void **)&capture_client);
+        result = IAudioClient_GetService(stream->client, &IID_IAudioCaptureClient,
+                                        (void **)&stream->capture);
     }
 
     if (SUCCEEDED(result)) {
-        printf("\nLoopback capture stream initialized. Cleaning up.\n");
-    } else {
-        printf("Loopback setup failed (HRESULT 0x%08lX).\n",
-               (unsigned long)result);
-        status = EXIT_FAILURE;
+        printf("\nLoopback capture ready: %lu Hz, %u channels.\n",
+               stream->format->nSamplesPerSec, stream->format->nChannels);
     }
-
-    // The stream is initialized but has not been started, so no Stop is needed.
-    // Release the capture service before its parent audio client.
-    if (capture_client != NULL) {
-        IAudioCaptureClient_Release(capture_client);
-    }
-    CoTaskMemFree(mix_format);
-    if (audio_client != NULL) {
-        IAudioClient_Release(audio_client);
-    }
-
-    return status;
+    return result;
 }
 
-static int initialize_and_cleanup_playback(IMMDeviceCollection *devices,
-                                           UINT output_count,
-                                           uint64_t selected_devices) {
+static HRESULT initialize_playback(IMMDeviceCollection *devices, UINT output_count,
+                                   uint64_t selected_devices, const WAVEFORMATEX *format,
+                                   PlaybackStream *streams, UINT *stream_count) {
     uint64_t remaining_devices = selected_devices;
     for (UINT index = 0; index < output_count && remaining_devices != 0;
          ++index, remaining_devices /= 2) {
@@ -490,56 +513,287 @@ static int initialize_and_cleanup_playback(IMMDeviceCollection *devices,
             continue;
         }
 
+        // Count this slot before setup so cleanup also handles partial failure.
+        PlaybackStream *stream = &streams[(*stream_count)++];
         IMMDevice *destination = NULL;
-        IAudioClient *audio_client = NULL;
-        IAudioRenderClient *render_client = NULL;
-        WAVEFORMATEX *mix_format = NULL;
-
         HRESULT result = IMMDeviceCollection_Item(devices, index, &destination);
-
         if (SUCCEEDED(result)) {
             result = IMMDevice_Activate(destination, &IID_IAudioClient,
-                                        CLSCTX_ALL, NULL, (void **)&audio_client);
-        }
-        if (SUCCEEDED(result)) {
-            result = IAudioClient_GetMixFormat(audio_client, &mix_format);
+                                       CLSCTX_ALL, NULL, (void **)&stream->client);
         }
 
+        // https://learn.microsoft.com/en-us/windows/win32/coreaudio/audclnt-streamflags-xxx-constants
+        // AUTOCONVERTPCM converts sample rate and channel layout as needed.
+        // SRC_DEFAULT_QUALITY selects the higher quality sample-rate converter.
+        // All our buffers use the source format; Windows converts at each output.
         if (SUCCEEDED(result)) {
-            result = IAudioClient_Initialize(audio_client, AUDCLNT_SHAREMODE_SHARED,
-                                            0, 0, 0, mix_format, NULL);
+            result = IAudioClient_Initialize(stream->client, AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                1000000, 0, format, NULL);
+        }
+        if (SUCCEEDED(result)) {
+            result = IAudioClient_GetService(stream->client, &IID_IAudioRenderClient,
+                                            (void **)&stream->render);
         }
 
+        // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-getbuffersize
+        // HRESULT GetBufferSize(UINT32 *pNumBufferFrames);
+        // pNumBufferFrames
+        // Receives the actual playback buffer capacity in audio frames.
         if (SUCCEEDED(result)) {
-            result = IAudioClient_GetService(audio_client, &IID_IAudioRenderClient,
-                                            (void **)&render_client);
+            result = IAudioClient_GetBufferSize(stream->client, &stream->buffer_frames);
         }
-
         if (SUCCEEDED(result)) {
-            printf("Playback stream initialized for device %u. Cleaning up.\n",
-                   index + 1);
-        } else {
-            printf("Playback setup failed for device %u (HRESULT 0x%08lX).\n",
-                   index + 1, (unsigned long)result);
-        }
-
-        if (render_client != NULL) {
-            IAudioRenderClient_Release(render_client);
-        }
-        CoTaskMemFree(mix_format);
-        if (audio_client != NULL) {
-            IAudioClient_Release(audio_client);
+            // Each destination holds at most another 100 ms of pending audio.
+            stream->capacity = format->nSamplesPerSec / 10;
+            stream->queue = malloc((size_t)stream->capacity * format->nBlockAlign);
+            if (stream->queue == NULL) {
+                result = E_OUTOFMEMORY;
+            }
         }
         if (destination != NULL) {
             IMMDevice_Release(destination);
         }
-
         if (FAILED(result)) {
-            return EXIT_FAILURE;
+            printf("Playback setup failed for device %u.\n", index + 1);
+            return result;
         }
+        printf("Playback stream ready for device %u.\n", index + 1);
+    }
+    return S_OK;
+}
+
+// A small linear queue keeps the copying simple. Keep the newest audio if full.
+static void queue_audio(PlaybackStream *stream, const BYTE *data, UINT32 frames,
+                        const WAVEFORMATEX *format, BOOL silent) {
+    size_t frame_bytes = format->nBlockAlign;
+    if (frames >= stream->capacity) {
+        if (!silent) {
+            data += (size_t)(frames - stream->capacity) * frame_bytes;
+        }
+        frames = stream->capacity;
+        stream->queued = 0;
+    } else if (frames > stream->capacity - stream->queued) {
+        UINT32 discard = frames - (stream->capacity - stream->queued);
+        stream->queued -= discard;
+        memmove(stream->queue, stream->queue + (size_t)discard * frame_bytes,
+                (size_t)stream->queued * frame_bytes);
     }
 
-    return EXIT_SUCCESS;
+    BYTE *tail = stream->queue + (size_t)stream->queued * frame_bytes;
+    if (silent) {
+        // Uncompressed 8-bit PCM is unsigned; other PCM/float silence is zero.
+        memset(tail, format->wBitsPerSample == 8 ? 128 : 0,
+               (size_t)frames * frame_bytes);
+    } else {
+        memcpy(tail, data, (size_t)frames * frame_bytes);
+    }
+    stream->queued += frames;
+}
+
+static HRESULT capture_audio(CaptureStream *source, PlaybackStream *outputs,
+                             UINT output_count) {
+    // https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-interlockedcompareexchange
+    // LONG InterlockedCompareExchange(
+    //   LONG volatile *Destination,
+    //   LONG          ExChange,
+    //   LONG          Comperand
+    // );
+    //
+    // Destination
+    // Points to the shared 32-bit value to access atomically.
+    //
+    // ExChange
+    // The value to store if the current value matches Comperand.
+    //
+    // Comperand
+    // The value to compare with the current value of Destination.
+    //
+    // Returns the value observed before the operation. Passing 0 for both
+    // ExChange and Comperand leaves the flag's value unchanged: 0 stays 0,
+    // and a nonzero value is not replaced. This acts as an atomic read paired
+    // with the console handler's InterlockedExchange write.
+    while (!InterlockedCompareExchange(&stop_requested, 0, 0)) {
+        // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudiocaptureclient-getbuffer
+        // HRESULT GetBuffer(
+        //   BYTE **ppData, UINT32 *pNumFramesToRead, DWORD *pdwFlags,
+        //   UINT64 *pu64DevicePosition, UINT64 *pu64QPCPosition
+        // );
+        // ppData
+        // Receives a packet pointer, valid until ReleaseBuffer.
+        // pNumFramesToRead
+        // Receives its frame count; an empty capture buffer has no frames.
+        // pdwFlags
+        // SILENT means the packet represents silence; its pointer need not be read.
+        // pu64DevicePosition, pu64QPCPosition
+        // Optional timestamps. NULL skips them in this basic forwarding loop.
+        BYTE *data = NULL;
+        UINT32 frames = 0;
+        DWORD flags = 0;
+        HRESULT result = IAudioCaptureClient_GetBuffer(source->capture, &data,
+                                                       &frames, &flags, NULL, NULL);
+        if (FAILED(result) || frames == 0) {
+            return result;
+        }
+
+        for (UINT i = 0; i < output_count; ++i) {
+            queue_audio(&outputs[i], data, frames, source->format,
+                        (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
+        }
+
+        // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudiocaptureclient-releasebuffer
+        // HRESULT ReleaseBuffer(UINT32 NumFramesRead);
+        // NumFramesRead
+        // Release the entire packet after making our own copies for every output.
+        result = IAudioCaptureClient_ReleaseBuffer(source->capture, frames);
+        if (FAILED(result)) {
+            return result;
+        }
+    }
+    return S_OK;
+}
+
+static HRESULT play_queued_audio(PlaybackStream *stream, WORD frame_bytes) {
+    if (stream->queued == 0) {
+        return S_OK;
+    }
+
+    // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-getcurrentpadding
+    // HRESULT GetCurrentPadding(UINT32 *pNumPaddingFrames);
+    // pNumPaddingFrames
+    // Receives the number of frames already queued in the WASAPI playback buffer.
+    UINT32 padding = 0;
+    HRESULT result = IAudioClient_GetCurrentPadding(stream->client, &padding);
+    if (FAILED(result)) {
+        return result;
+    }
+
+    UINT32 frames = stream->buffer_frames - padding;
+    if (frames > stream->queued) {
+        frames = stream->queued;
+    }
+    if (frames == 0) {
+        return S_OK;
+    }
+
+    // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudiorenderclient-getbuffer
+    // HRESULT GetBuffer(UINT32 NumFramesRequested, BYTE **ppData);
+    // NumFramesRequested
+    // Number of frames to write, no larger than the available playback space.
+    // ppData
+    // Receives a writable buffer owned by WASAPI.
+    BYTE *data = NULL;
+    result = IAudioRenderClient_GetBuffer(stream->render, frames, &data);
+    if (FAILED(result)) {
+        return result;
+    }
+    memcpy(data, stream->queue, (size_t)frames * frame_bytes);
+
+    // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudiorenderclient-releasebuffer
+    // HRESULT ReleaseBuffer(UINT32 NumFramesWritten, DWORD dwFlags);
+    // NumFramesWritten
+    // Number of frames to submit for playback.
+    // dwFlags
+    // Zero submits the copied samples; SILENT submits silence instead.
+    result = IAudioRenderClient_ReleaseBuffer(stream->render, frames, 0);
+    if (SUCCEEDED(result)) {
+        stream->queued -= frames;
+        memmove(stream->queue, stream->queue + (size_t)frames * frame_bytes,
+                (size_t)stream->queued * frame_bytes);
+    }
+    return result;
+}
+
+static HRESULT forward_audio(CaptureStream *source, PlaybackStream *outputs,
+                             UINT output_count) {
+    InterlockedExchange(&stop_requested, 0);
+    // https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler
+    // BOOL SetConsoleCtrlHandler(PHANDLER_ROUTINE HandlerRoutine, BOOL Add);
+    // HandlerRoutine
+    // Called by Windows on Ctrl+C or Ctrl+Break; ours signals the polling loop.
+    // Add
+    // TRUE registers the handler; FALSE removes it after stream cleanup.
+    if (!SetConsoleCtrlHandler(handle_console_signal, TRUE)) {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+
+    HRESULT result = S_OK;
+    for (UINT i = 0; i < output_count; ++i) {
+        // Prime each output with silence to give the polling loop some headroom.
+        BYTE *data = NULL;
+        result = IAudioRenderClient_GetBuffer(outputs[i].render,
+                                             outputs[i].buffer_frames, &data);
+        if (SUCCEEDED(result)) {
+            result = IAudioRenderClient_ReleaseBuffer(outputs[i].render,
+                outputs[i].buffer_frames, AUDCLNT_BUFFERFLAGS_SILENT);
+        }
+        // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-start
+        // HRESULT Start();
+        // Starts processing audio for an initialized stream.
+        if (SUCCEEDED(result)) {
+            result = IAudioClient_Start(outputs[i].client);
+        }
+        if (FAILED(result)) {
+            return result;
+        }
+        outputs[i].started = TRUE;
+    }
+
+    result = IAudioClient_Start(source->client);
+    if (FAILED(result)) {
+        return result;
+    }
+    source->started = TRUE;
+    printf("Forwarding audio. Press Ctrl+C to stop.\n");
+    fflush(stdout);
+
+    while (!InterlockedCompareExchange(&stop_requested, 0, 0)) {
+        result = capture_audio(source, outputs, output_count);
+        if (FAILED(result)) {
+            return result;
+        }
+        for (UINT i = 0; i < output_count; ++i) {
+            result = play_queued_audio(&outputs[i], source->format->nBlockAlign);
+            if (FAILED(result)) {
+                return result;
+            }
+        }
+
+        // Sleep for a short time to avoid busy-waiting. 
+        Sleep(1);
+    }
+    printf("\nStopping audio forwarding.\n");
+    return S_OK;
+}
+
+static void cleanup_streams(CaptureStream *source, PlaybackStream *outputs,
+                            UINT output_count) {
+    // https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-stop
+    // HRESULT Stop();
+    // Stops processing a started stream. Release its service before its client.
+    if (source->started) {
+        IAudioClient_Stop(source->client);
+    }
+    for (UINT i = 0; i < output_count; ++i) {
+        if (outputs[i].started) {
+            IAudioClient_Stop(outputs[i].client);
+        }
+        if (outputs[i].render != NULL) {
+            IAudioRenderClient_Release(outputs[i].render);
+        }
+        if (outputs[i].client != NULL) {
+            IAudioClient_Release(outputs[i].client);
+        }
+        free(outputs[i].queue);
+    }
+    if (source->capture != NULL) {
+        IAudioCaptureClient_Release(source->capture);
+    }
+    if (source->client != NULL) {
+        IAudioClient_Release(source->client);
+    }
+    CoTaskMemFree(source->format);
+    SetConsoleCtrlHandler(handle_console_signal, FALSE);
 }
 
 static void cleanup_audio(IMMDeviceEnumerator *enumerator,
@@ -560,7 +814,6 @@ int main(void) {
     printf("audioRouter starting.\n");
 
     IMMDeviceEnumerator *enumerator = initialize_audio();
-
     UINT output_count = 0;
     IMMDeviceCollection *devices = list_playback_devices(enumerator, &output_count);
 
@@ -568,21 +821,30 @@ int main(void) {
     int status = select_playback_devices(devices, output_count, &selected_devices);
 
     IMMDevice *source_device = get_default_playback_device(enumerator);
-
     if (status == EXIT_SUCCESS) {
-        status = validate_destinations(devices, output_count, selected_devices,
-                                       source_device);
+        status = validate_destinations(devices, output_count, selected_devices, source_device);
     }
 
+    CaptureStream source = {0};
+    PlaybackStream outputs[64] = {0};
+    UINT stream_count = 0;
+    HRESULT result = S_OK;
     if (status == EXIT_SUCCESS && selected_devices != 0) {
-        status = initialize_and_cleanup_loopback(source_device);
+        result = initialize_loopback(source_device, &source);
+        if (SUCCEEDED(result)) {
+            result = initialize_playback(devices, output_count, selected_devices,
+                                        source.format, outputs, &stream_count);
+        }
+        if (SUCCEEDED(result)) {
+            result = forward_audio(&source, outputs, stream_count);
+        }
+        if (FAILED(result)) {
+            printf("Audio forwarding failed (HRESULT 0x%08lX).\n", (unsigned long)result);
+            status = EXIT_FAILURE;
+        }
     }
 
-    if (status == EXIT_SUCCESS && selected_devices != 0) {
-        status = initialize_and_cleanup_playback(devices, output_count,
-                                                selected_devices);
-    }
-
+    cleanup_streams(&source, outputs, stream_count);
     cleanup_audio(enumerator, devices, source_device);
     return status;
 }
