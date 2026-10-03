@@ -480,6 +480,68 @@ static int initialize_and_cleanup_loopback(IMMDevice *source_device) {
     return status;
 }
 
+static int initialize_and_cleanup_playback(IMMDeviceCollection *devices,
+                                           UINT output_count,
+                                           uint64_t selected_devices) {
+    uint64_t remaining_devices = selected_devices;
+    for (UINT index = 0; index < output_count && remaining_devices != 0;
+         ++index, remaining_devices /= 2) {
+        if (remaining_devices % 2 == 0) {
+            continue;
+        }
+
+        IMMDevice *destination = NULL;
+        IAudioClient *audio_client = NULL;
+        IAudioRenderClient *render_client = NULL;
+        WAVEFORMATEX *mix_format = NULL;
+
+        HRESULT result = IMMDeviceCollection_Item(devices, index, &destination);
+
+        if (SUCCEEDED(result)) {
+            result = IMMDevice_Activate(destination, &IID_IAudioClient,
+                                        CLSCTX_ALL, NULL, (void **)&audio_client);
+        }
+        if (SUCCEEDED(result)) {
+            result = IAudioClient_GetMixFormat(audio_client, &mix_format);
+        }
+
+        if (SUCCEEDED(result)) {
+            result = IAudioClient_Initialize(audio_client, AUDCLNT_SHAREMODE_SHARED,
+                                            0, 0, 0, mix_format, NULL);
+        }
+
+        if (SUCCEEDED(result)) {
+            result = IAudioClient_GetService(audio_client, &IID_IAudioRenderClient,
+                                            (void **)&render_client);
+        }
+
+        if (SUCCEEDED(result)) {
+            printf("Playback stream initialized for device %u. Cleaning up.\n",
+                   index + 1);
+        } else {
+            printf("Playback setup failed for device %u (HRESULT 0x%08lX).\n",
+                   index + 1, (unsigned long)result);
+        }
+
+        if (render_client != NULL) {
+            IAudioRenderClient_Release(render_client);
+        }
+        CoTaskMemFree(mix_format);
+        if (audio_client != NULL) {
+            IAudioClient_Release(audio_client);
+        }
+        if (destination != NULL) {
+            IMMDevice_Release(destination);
+        }
+
+        if (FAILED(result)) {
+            return EXIT_FAILURE;
+        }
+    }
+
+    return EXIT_SUCCESS;
+}
+
 static void cleanup_audio(IMMDeviceEnumerator *enumerator,
                           IMMDeviceCollection *devices, IMMDevice *source_device) {
     IMMDevice_Release(source_device);
@@ -514,6 +576,11 @@ int main(void) {
 
     if (status == EXIT_SUCCESS && selected_devices != 0) {
         status = initialize_and_cleanup_loopback(source_device);
+    }
+
+    if (status == EXIT_SUCCESS && selected_devices != 0) {
+        status = initialize_and_cleanup_playback(devices, output_count,
+                                                selected_devices);
     }
 
     cleanup_audio(enumerator, devices, source_device);
