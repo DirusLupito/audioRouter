@@ -80,5 +80,32 @@ int main(void) {
         printf("  %u: %s\n", id, device.szPname);
     }
 
+    printf("Identify by number which playback device(s) you wish to split audio to. WARNING: Do not select the primary playback device used by Windows.\n");
+
+    char input[256] = {0};
+
+    uint32_t selected_device_id = 0;
+
+    if (fgets(input, sizeof(input), stdin) == NULL) {
+        printf("Error reading input.\n");
+        status = EXIT_FAILURE;
+    } else {
+        // Remove newline character if present
+        size_t len = strlen(input);
+        if (len > 0 && input[len - 1] == '\n') {
+            input[len - 1] = '\0';
+        }
+        // Process the input as needed
+
+        selected_device_id = (uint32_t) strtoul(input, NULL, 10);
+        if (selected_device_id >= output_count) {
+            printf("Invalid device ID selected.\n");
+            status = EXIT_FAILURE;
+        }
+    }
+    printf("Selected device ID: %u\n", selected_device_id);
+
+
+
     return status;
 }
