@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <wchar.h>
 
 int main(void) {
     printf("audioRouter starting.\n");
@@ -277,6 +278,34 @@ int main(void) {
     printf("Name: %ls\n", source_name.pwszVal);
     printf("Endpoint ID: %ls\n", source_endpoint_id);
     printf("Direction: playback (eRender)\nRole: console (eConsole)\n");
+
+    // check and see if the user selected the default playback device as one of the destinations.
+
+    uint64_t remaining_devices = selected_devices;
+    for (UINT index = 0; index < output_count && remaining_devices != 0;
+         ++index, remaining_devices /= 2) {
+        if (remaining_devices % 2 == 0) {
+            continue;
+        }
+
+        IMMDevice *selected_device = NULL;
+        IMMDeviceCollection_Item(devices, index, &selected_device);
+
+        LPWSTR endpoint_id = NULL;
+        IMMDevice_GetId(selected_device, &endpoint_id);
+        int is_source = wcscmp(endpoint_id, source_endpoint_id) == 0;
+
+        CoTaskMemFree(endpoint_id);
+        IMMDevice_Release(selected_device);
+
+        if (is_source) {
+            printf("Error: device %u is the default playback device. "
+                   "Choose a different destination to avoid audio feedback.\n",
+                   index + 1);
+            status = EXIT_FAILURE;
+            break;
+        }
+    }
 
     CoTaskMemFree(source_endpoint_id);
     PropVariantClear(&source_name);
