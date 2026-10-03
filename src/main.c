@@ -7,6 +7,8 @@
 #include <functiondiscoverykeys_devpkey.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
 
 int main(void) {
     printf("audioRouter starting.\n");
@@ -142,7 +144,7 @@ int main(void) {
         // https://learn.microsoft.com/en-us/windows/win32/coreaudio/pkey-device-friendlyname
         // PKEY_Device_FriendlyName returns a VT_LPWSTR containing the display name.
         IPropertyStore_GetValue(properties, &PKEY_Device_FriendlyName, &name);
-        printf("  %u: %ls\n", index, name.pwszVal);
+        printf("  %u: %ls\n", index + 1, name.pwszVal);
 
         // https://learn.microsoft.com/en-us/windows/win32/api/propidl/nf-propidl-propvariantclear
         // HRESULT PropVariantClear(
@@ -163,25 +165,36 @@ int main(void) {
         IMMDevice_Release(device);
     }
 
-    printf("Identify by number which playback device you wish to split audio to. "
+    printf("Enter up to 64 binary digits to select playback devices.\n"
+           "Leftmost digit = device 1, next digit = device 2, etc.\n"
+           "Omitted digits are 0; all zeros exits.\n"
            "WARNING: Do not select the primary playback device used by Windows.\n");
 
-    char input[256] = {0};
+    char input[65] = {0};
+    uint64_t selected_devices = 0;
     int status = EXIT_SUCCESS;
 
     if (fgets(input, sizeof(input), stdin) == NULL) {
         printf("Error reading input.\n");
         status = EXIT_FAILURE;
     } else {
-        unsigned long selected_device_index = strtoul(input, NULL, 10);
+        // for example, 000 means no devices selected, 001 means device 3 selected,
+        // 100 means device 1 selected, 101 means devices 1 and 3 selected, etc.
 
-        if (selected_device_index >= output_count) {
-            printf("Invalid device index selected.\n");
-            status = EXIT_FAILURE;
-        } else {
+        size_t digit_count = strcspn(input, "\r\n");
+        for (size_t i = digit_count; i > 0; --i) {
+            selected_devices = selected_devices * 2 + (input[i - 1] - '0');
+        }
+
+        uint64_t remaining_devices = selected_devices;
+        for (UINT index = 0; index < output_count && remaining_devices != 0;
+             ++index, remaining_devices /= 2) {
+            if (remaining_devices % 2 == 0) {
+                continue;
+            }
+
             IMMDevice *selected_device = NULL;
-            IMMDeviceCollection_Item(devices, (UINT)selected_device_index,
-                                     &selected_device);
+            IMMDeviceCollection_Item(devices, index, &selected_device);
 
             // https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nf-mmdeviceapi-immdevice-getid
             // HRESULT GetId(
@@ -194,7 +207,7 @@ int main(void) {
             // Free the string with CoTaskMemFree when finished.
             LPWSTR endpoint_id = NULL;
             IMMDevice_GetId(selected_device, &endpoint_id);
-            printf("Selected device index: %lu\n", selected_device_index);
+            printf("Selected device: %u\n", index + 1);
             printf("Endpoint ID: %ls\n", endpoint_id);
 
             // https://learn.microsoft.com/en-us/windows/win32/api/combaseapi/nf-combaseapi-cotaskmemfree
