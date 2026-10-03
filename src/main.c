@@ -12,6 +12,9 @@
 #include <string.h>
 #include <wchar.h>
 
+// Pending audio per destination, in milliseconds. Use a positive integer.
+#define QUEUE_DURATION_MS 10
+
 typedef struct {
     IAudioClient *client;
     IAudioCaptureClient *capture;
@@ -544,8 +547,9 @@ static HRESULT initialize_playback(IMMDeviceCollection *devices, UINT output_cou
             result = IAudioClient_GetBufferSize(stream->client, &stream->buffer_frames);
         }
         if (SUCCEEDED(result)) {
-            // Each destination holds at most another 100 ms of pending audio.
-            stream->capacity = format->nSamplesPerSec / 10;
+            // Convert the queue duration to a number of source-format frames.
+            stream->capacity = (UINT32)((uint64_t)format->nSamplesPerSec *
+                                        QUEUE_DURATION_MS / 1000);
             stream->queue = malloc((size_t)stream->capacity * format->nBlockAlign);
             if (stream->queue == NULL) {
                 result = E_OUTOFMEMORY;
